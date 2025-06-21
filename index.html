@@ -88,6 +88,29 @@ Heap-Based Memory Corruption in Zsh History Expansion Enables Privilege Retentio
   </style>
 </head>
 <body>
+  <div class="section" style="background:#fff3f3; border-left: 6px solid #cc0000; padding: 20px; border-radius: 10px; box-shadow: 0 0 8px rgba(0,0,0,0.05);">
+  <h2 style="color:#cc0000; margin-top:0;">🔍 Key Behavioral Characteristics of the Vulnerability</h2>
+  <ol style="font-size: 16px; color:#333; line-height:1.6;">
+    <li><strong>This bug is specific to <code>zsh</code></strong> and does <em>not</em> affect <code>bash</code>.</li>
+    <li>The crash is triggered when <strong>history expansion <code>!!</code></strong> is followed by exactly <strong>11 digits of any number between 1 and 8</strong>.<br>
+        Example: <code>!!11111111111</code></li>
+    <li>Only digit ranges <code>1</code> to <code>8</code> are accepted. The bug does <strong>not trigger with 9s</strong>.<br>
+        Examples:
+        <ul style="margin-left:20px;">
+          <li><code>!!22222222222</code> ✅</li>
+          <li><code>!!99999999999</code> ❌</li>
+        </ul>
+    </li>
+    <li>Wrapping the payload in <strong>single quotes prevents it</strong> from expanding.<br>
+        ✅ Works: <code>!!11111111111</code>, <code>"!!11111111111"</code><br>
+        ❌ Does not work: <code>'!!11111111111'</code></li>
+    <li>When running <code>zsh -f</code> directly and entering <code>!!11111111111</code>, it fails with:<br>
+        <code>zsh: no such event: 0</code><br>
+        This is expected, because <code>!!</code> tries to expand the last command — and there is none yet.</li>
+    <li>However, if <strong>any command is entered before</strong> (even an invalid one), it is stored in history, and <code>!!11111111111</code> then triggers the crash consistently.</li>
+  </ol>
+</div>
+
 
   <div class="section">
     <h1>1. Executive Summary</h1>
