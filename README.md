@@ -12,7 +12,7 @@
 **CVE ID:** *CVE-2025-XXXXX* (Assigned)  
 **Reporter:** [Rana M. Sinan Adil](mailto:ranasinanadil@gmail.com)  
 **Status:** Reserved / Awaiting public reference update  
-**Advisory PDF:** [📄 Download Full Report](./zsh_exploit_report.pdf)
+**Advisory Page:** [📄 See Full Report](https://livepwn.github.io/CVE/)
 
 ---
 
