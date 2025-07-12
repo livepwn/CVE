@@ -125,7 +125,7 @@ Heap-Based Memory Corruption in Zsh History Expansion Enables Privilege Retentio
     <p>By crafting large values in <code>!!</code> input, the attacker reads heap data and can observe valid libc pointers, bypassing ASLR. This allows precise calculation of the libc base address required for further exploitation like ROP chaining.</p>
 
     <div class="vuln-title">Privilege Retention Exploit</div>
-    <p>When Zsh is run as root (via sudo or setuid) and crashed in GDB, attacker can use memory manipulation to spawn a persistent root shell, bypassing session cleanup and escalating temporary root access into permanent privilege retention.</p>
+    <p>When Zsh is run as root (via sudo ) and crashed in GDB, attacker can use memory manipulation to spawn a persistent root shell, bypassing session cleanup and escalating temporary root access into permanent privilege retention.</p>
 
     <div class="vuln-title">Writable Heap Structures with Function Pointers</div>
     <p>Zsh maintains internal data structures on the heap, which are writable and readable post-crash. Overwriting pointers in these structures (e.g. vtable-like regions) could redirect control flow and trigger arbitrary function execution.</p>
@@ -323,14 +323,14 @@ Libc base = 0x7f1753b83cc0 - 0x21cc0 = 0x7f1753962000
 
   <p>By overwriting a heap-based function pointer with the address of this chain or directly invoking it via indirect execution, RIP control is achieved. This hijack circumvents typical stack protections, as it does not rely on direct buffer overflows on the stack.</p>
 
-  <p><strong>Impact:</strong> Full arbitrary code execution by hijacking the instruction pointer (RIP). This enables executing <code>/bin/sh</code> or reverse shells with root privileges (if Zsh is setuid). It’s the final stage of exploitability made possible by earlier memory leaks and heap corruption.</p>
+  <p><strong>Impact:</strong> Full arbitrary code execution by hijacking the instruction pointer (RIP). This enables executing <code>/bin/sh</code> or reverse shells . It’s the final stage of exploitability made possible by earlier memory leaks and heap corruption.</p>
 </div>
 
 
 <div class="section">
   <h2>Technical Details: 6. GDB Exploit-Only Shell Injection</h2>
 
-  <p><strong>Description:</strong> This technique leverages a post-crash debugging session inside <code>gdb</code> to inject and execute shellcode within the crashed <code>zsh</code> process. Because <code>zsh</code> is launched with elevated privileges (e.g., via <code>sudo</code> or setuid root), and <code>gdb</code> retains the full memory space and execution context, it becomes possible to escalate privileges and spawn a root shell <strong>without any additional vulnerability</strong> once the initial crash has occurred.</p>
+  <p><strong>Description:</strong> This technique leverages a post-crash debugging session inside <code>gdb</code> to inject and execute shellcode within the crashed <code>zsh</code> process. Because <code>zsh</code> is launched with elevated privileges (e.g., via <code>sudo</code> or  root), and <code>gdb</code> retains the full memory space and execution context, it becomes possible to escalate privileges and spawn a root shell <strong>without any additional vulnerability</strong> once the initial crash has occurred.</p>
 
   <p>By modifying memory or registers in the paused process using <code>gdb</code> commands, the attacker can simulate execution flow redirection to injected shellcode. This bypasses traditional exploitation barriers like ASLR, stack canaries, or non-executable stacks, since all code injection happens manually through gdb.</p>
 
@@ -531,7 +531,7 @@ Watchpoint 1: old value = 1404583104, new value = <unreadable>
     <li>Opportunity for redirection (e.g., via a later function call or jump to heap)</li>
   </ul>
 
-  <p><strong>Impact:</strong> This behavior simulates a classic data-to-code transformation — attacker writes data (ROP/shellcode), then tricks program into executing it. It's especially dangerous in a setuid-root binary where attackers can craft a root shell.</p>
+  <p><strong>Impact:</strong> This behavior simulates a classic data-to-code transformation — attacker writes data (ROP/shellcode), then tricks program into executing it.</p>
 
   <p><strong>Severity:</strong> <span class="critical">Critical</span>. Arbitrary writable + executable flow based on user input breaks core memory safety assumptions and leads to full system compromise.</p>
 </div>
@@ -542,7 +542,7 @@ Watchpoint 1: old value = 1404583104, new value = <unreadable>
 <div class="section">
   <h2>Technical Details: 11. Privilege Retention Exploit via GDB</h2>
 
-  <p><strong>Description:</strong> Zsh, when installed as a <code>setuid-root</code> binary (or run via <code>sudo</code>), may retain elevated privileges during debugging sessions. When a segmentation fault occurs and the binary is paused inside GDB, the effective user ID (euid) remains <code>0 (root)</code>, even though the user running GDB is unprivileged. This enables exploitation of memory and register state to escalate to a persistent root shell without ever returning to normal execution.</p>
+  <p><strong>Description:</strong> Zsh, when <code></code>run via <code>sudo</code>, may retain elevated privileges during debugging sessions. When a segmentation fault occurs and the binary is paused inside GDB, the effective user ID (euid) remains <code>0 (root)</code>, even though the user running GDB is unprivileged. This enables exploitation of memory and register state to escalate to a persistent root shell without ever returning to normal execution.</p>
 
   <p><strong>Mechanism:</strong></p>
   <ul>
@@ -765,9 +765,9 @@ uid=0(root) gid=0(root) groups=0(root) </mark>
     <li>Even without a working ROP chain, attacker can hijack <code>$rip</code> or overwrite function return values.</li>
   </ul>
 
-  <p><strong>Exploit Scenario:</strong> Launch Zsh with sudo or as a setuid binary, inject crashing input (e.g., <code>!!</code>), then modify the GDB session to inject and execute a root shell payload.</p>
+  <p><strong>Exploit Scenario:</strong> Launch Zsh with sudo, inject crashing input (e.g., <code>!!</code>), then modify the GDB session to inject and execute a root shell payload.</p>
 
-  <p><strong>Severity:</strong> <span class="critical">Critical</span>. Privilege retention inside GDB from a setuid binary enables full privilege escalation without kernel-level exploits. It turns Zsh into a local root vector via post-crash manipulation.</p>
+  <p><strong>Severity:</strong> <span class="critical">Critical</span>. Privilege retention inside GDB from a crash enables privilege escalation without kernel-level exploits. It turns Zsh into a local root vector via post-crash manipulation.</p>
 </div>
 
   <div class="section">
@@ -786,7 +786,7 @@ uid=0(root) gid=0(root) groups=0(root) </mark>
     <li><strong>Availability Impact:</strong> High (segfault and process crash)</li>
   </ul>
 
-  <p>This vulnerability allows full root shell access, bypasses ASLR, enables arbitrary memory read/write, and is easily reproducible using crafted input to Zsh. Exploitation does not require any special privileges or user interaction, making it a <strong>critical security risk</strong> in any system where <code>zsh</code> is installed setuid or used with <code>sudo</code> sessions.</p>
+  <p>This vulnerability allows full root shell access, bypasses ASLR, enables arbitrary memory read/write, and is easily reproducible using crafted input to Zsh. Exploitation does not require any special privileges or user interaction, making it a <strong>critical security risk</strong> in any system where <code>zsh</code> is installed used with <code>sudo</code> sessions.</p>
 </div>
   <div class="section">
     <h2>8. Disclosure Timeline</h2>
